@@ -1,0 +1,7 @@
+Start MinIO Server -> minio server ~/minio-data --console-address ":9001"
+docker compose down -v
+docker compose up --build
+Admin@123#@!
+Admin%40123%23%40%21
+
+

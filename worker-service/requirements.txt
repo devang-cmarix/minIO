@@ -1,0 +1,4 @@
+pika
+minio
+google-api-python-client
+google-auth

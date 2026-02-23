@@ -1,0 +1,8 @@
+streamlit
+minio
+pymongo
+PyPDF2
+pandas
+mysql-connector-python
+pika
+PyMuPDF

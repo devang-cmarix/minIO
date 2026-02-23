@@ -1,0 +1,125 @@
+version: "3.9"
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    ports:
+      - "9000:9000" #API/MinIO client
+      - "9001:9001" #Console
+
+  #1st Pipeline
+
+  connector:
+    build: ./connector-service
+    depends_on:
+      - rabbitmq
+    volumes:
+      - ./credentials.json:/app/credentials.json
+  worker:
+    build: ./worker-service
+    depends_on:
+      - rabbitmq
+      - minio
+    volumes:
+      - ./credentials.json:/app/credentials.json
+
+      #2nd Pipeline
+  mongodb:
+    image: mongo:7
+    ports:
+    - "27020:27017"
+    volumes:
+    - mongo_data:/data/db
+
+  pdf_processor:
+    build: ./pdf_processor
+    depends_on:
+      - rabbitmq
+      - minio
+      - mongodb
+    environment:
+      MONGO_URL: mongodb://mongodb:27017/
+      MONGO_DB: files_db
+      MONGO_COLL: pdf_texts
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+  
+  #3rd Pipeline
+
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: Admin@123#@!
+      MYSQL_DATABASE: documents
+    ports:
+      - "3308:3306"
+
+  ai-parser:
+    build: ./ai-parser
+    environment:
+      GROQ_API_KEY: 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
+      MONGO_URL: mongodb://mongodb:27017/
+      MONGO_DB: files_db
+      MONGO_COLL: pdf_texts
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      - rabbitmq
+      - mongodb
+
+  validator:
+    build: ./validator
+    depends_on:
+      - rabbitmq
+      - mysql
+
+  fallback-parser:
+    build: ./fallback-parser
+    depends_on:
+      - rabbitmq
+
+  review-service:
+    build: ./review-service
+    depends_on:
+      - rabbitmq
+      - mongodb
+    environment:
+      MONGO_URL: mongodb://mongodb:27017/
+      MONGO_DB: files_db
+      MONGO_COLL: pdf_texts
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minio
+      MINIO_SECRET_KEY: minio123
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: files_db
+      MONGO_COLL: pdf_texts
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: root
+      MYSQL_PASSWORD: Admin@123#@!
+      MYSQL_DB: documents
+    depends_on:
+      - minio
+      - mongodb
+      - rabbitmq
+      - mysql
+
+volumes:
+  mongo_data:
