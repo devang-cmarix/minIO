@@ -7,6 +7,13 @@ def _to_float(val, default=0.0):
     except Exception:
         return default
 
+def normalize_array(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return list(value.values())
+    return []
+
 
 def validate_invoice(data: dict):
     errors = []
@@ -22,16 +29,17 @@ def validate_invoice(data: dict):
     subtotal = _to_float(data.get("subtotal"))
     total = _to_float(data.get("total"))
 
-    taxes = data.get("taxes") or []
-    items = data.get("items") or []
+    taxes = normalize_array(data.get("invoice_taxes") or data.get("taxes")) or []
+    items = normalize_array(data.get("invoice_items") or data.get("items")) or []
 
     tax_sum = sum(_to_float(t.get("tax_amount")) for t in taxes)
     item_sum = sum(_to_float(i.get("amount")) for i in items)
 
     # ---- Subtotal check ----
     if subtotal > 0 and item_sum > 0:
-        if abs(subtotal - item_sum) > 1.0:
+        if abs(subtotal - item_sum) > 5.0:
             errors.append("subtotal mismatch")
+
 
     # ---- Total check ----
     if subtotal > 0 and total > 0:

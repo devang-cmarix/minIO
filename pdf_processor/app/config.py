@@ -10,6 +10,7 @@ class Settings:
     MINIO_BUCKET = "drive-bucket"
 
     MONGO_URL = os.getenv("MONGO_URL", "mongodb://mongo:27017/")
-    DB_NAME = "documents"
+    DB_NAME = "files_db"
+    COLLECTION = "pdf_texts"
 
 settings = Settings()

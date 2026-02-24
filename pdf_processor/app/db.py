@@ -3,4 +3,4 @@ from .config import settings
 
 client = MongoClient(settings.MONGO_URL)
 db = client[settings.DB_NAME]
-collection = db["pdf_data"]
+collection = db[settings.COLLECTION]

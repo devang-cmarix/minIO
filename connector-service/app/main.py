@@ -4,6 +4,7 @@ from .drive_client import DriveClient
 from .publisher import EventPublisher
 from .config import settings
 from .logger import get_logger
+from concurrent.futures import ThreadPoolExecutor
 
 logger = get_logger("connector")
 
@@ -28,7 +29,6 @@ def run():
             #         seen_files.add(f["id"])
 
             for f in files:
-                # Skip folders
                 if f["mimeType"] == "application/vnd.google-apps.folder":
                     continue
 
@@ -42,6 +42,11 @@ def run():
                     }
                     publisher.publish(event)
                     seen_files.add(f["id"])
+
+            # # Publish in parallel
+            # if new_events:
+            #     with ThreadPoolExecutor(max_workers=10) as executor:
+            #         executor.submit(publisher.publish, new_events)
 
             
         except Exception as e:

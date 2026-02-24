@@ -47,18 +47,32 @@ def get_cursor():
 def init_tables():
     cursor = get_cursor()
 
+    # cursor.execute("""
+    # CREATE TABLE IF NOT EXISTS invoices (
+    #     id INT AUTO_INCREMENT PRIMARY KEY,
+    #     invoice_date DATE,
+    #     due_date DATE,
+    #     vendor_name VARCHAR(255),
+    #     customer_name VARCHAR(255),
+    #     subtotal DECIMAL(10,2),
+    #     total DECIMAL(10,2),
+    #     raw_text LONGTEXT
+    # )
+    # """)
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS invoices (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        invoice_date DATE,
-        due_date DATE,
-        vendor_name VARCHAR(255),
-        customer_name VARCHAR(255),
-        subtotal DECIMAL(10,2),
-        total DECIMAL(10,2),
-        raw_text LONGTEXT
-    )
-    """)
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    invoice_date DATE,
+    due_date DATE,
+    vendor_name VARCHAR(255),
+    customer_name VARCHAR(255),
+    subtotal DECIMAL(12,2),
+    total DECIMAL(12,2),
+    raw_text LONGTEXT,
+    UNIQUE KEY unique_invoice (invoice_date, vendor_name, total)
+)
+""")
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS invoice_items (
@@ -94,7 +108,9 @@ def insert_invoice(file, data, raw_text=""):
             subtotal,
             total,
             raw_text
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s) 
+        ON DUPLICATE KEY UPDATE
+    raw_text = VALUES(raw_text)
     """, (
         data.get("invoice_date"),
         data.get("due_date"),
@@ -105,7 +121,21 @@ def insert_invoice(file, data, raw_text=""):
         raw_text
     ))
 
-    invoice_id = cursor.lastrowid
+    if cursor.lastrowid:
+        invoice_id = cursor.lastrowid
+    else:
+        cursor.execute("""
+            SELECT id FROM invoices
+            WHERE invoice_date=%s
+            AND vendor_name=%s
+            AND total=%s
+            LIMIT 1
+        """, (
+            data.get("invoice_date"),
+            data.get("vendor_name"),
+            data.get("total")
+        ))
+        invoice_id = cursor.fetchone()[0]
 
     # --- Handle items ---
     items = (
@@ -113,7 +143,12 @@ def insert_invoice(file, data, raw_text=""):
         data.get("items") or
         []
     )
+    
+    if not isinstance(items, list):
+        items = []
 
+    logger.info(f"Inserting {len(items)} invoice items")
+    
     for item in items:
         cursor.execute("""
             INSERT INTO invoice_items
@@ -122,9 +157,9 @@ def insert_invoice(file, data, raw_text=""):
         """, (
             invoice_id,
             item.get("description"),
-            item.get("quantity"),
-            item.get("rate"),
-            item.get("amount")
+            float(item.get("quantity",0)),
+            float(item.get("rate",)),
+            float(item.get("amount",0))
         ))
 
     # --- Handle taxes ---
@@ -134,6 +169,11 @@ def insert_invoice(file, data, raw_text=""):
         []
     )
 
+    if not isinstance(taxes, list):
+        taxes = []
+
+    logger.info(f"Inserting {len(taxes)} invoice taxes")
+
     for tax in taxes:
         cursor.execute("""
             INSERT INTO invoice_taxes
@@ -142,8 +182,8 @@ def insert_invoice(file, data, raw_text=""):
         """, (
             invoice_id,
             tax.get("tax_type"),
-            tax.get("tax_rate"),
-            tax.get("tax_amount")
+            float(tax.get("tax_rate",0)),
+            float(tax.get("tax_amount",0))
         ))
 
 

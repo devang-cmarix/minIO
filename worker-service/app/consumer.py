@@ -36,21 +36,69 @@ import time
 def start_worker():
     worker = Worker()
     params = pika.URLParameters(settings.RABBITMQ_URL)
+    params.heartbeat = 300  # 5 minutes
+    params.blocked_connection_timeout = 300
 
     while True:
         try:
             logger.info("Connecting to RabbitMQ...")
             connection = pika.BlockingConnection(params)
             channel = connection.channel()
-            channel.queue_declare(queue=settings.QUEUE_NAME, durable=True)
+            
+            channel.queue_declare(
+            queue=settings.QUEUE_NAME,
+            durable=True,
+            arguments={
+                "x-dead-letter-exchange": "",
+                "x-dead-letter-routing-key": "file.upload.dlq"
+            }
+        )
+
+            channel.queue_declare(
+                queue="file.upload.dlq",
+                durable=True
+            )
+            # def callback(ch, method, properties, body):
+            #     try:
+            #         worker.process(body)
+            #         ch.basic_ack(delivery_tag=method.delivery_tag)
+            #     except Exception:
+            #         logger.exception("Worker failed")
+            #         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
             def callback(ch, method, properties, body):
+                msg = json.loads(body)
+
+                retry_count = msg.get("retry", 0)
+
                 try:
-                    worker.process(body)
+                    worker.process(body)   # your MinIO upload logic
                     ch.basic_ack(delivery_tag=method.delivery_tag)
-                except Exception:
-                    logger.exception("Worker failed")
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+                except Exception as e:
+                    logger.error(f"Upload failed: {e}")
+
+                    if retry_count < 3:
+                        msg["retry"] = retry_count + 1
+                        channel.basic_publish(
+                            exchange="",
+                            routing_key="file.upload",
+                            body=json.dumps(msg),
+                            properties=pika.BasicProperties(delivery_mode=2)
+                        )
+                        logger.warning(f"Retrying upload ({retry_count+1})")
+                    else:
+                        channel.basic_publish(
+                            exchange="",
+                            routing_key="file.upload.dlq",
+                            body=json.dumps(msg),
+                            properties=pika.BasicProperties(delivery_mode=2)
+                        )
+                        logger.error("Moved to DLQ")
+
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+
 
             channel.basic_consume(
                 queue=settings.QUEUE_NAME,

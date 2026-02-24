@@ -35,6 +35,15 @@ Schema:
     }
   ]
 }
+
+Return STRICT valid JSON.
+Do NOT use numeric keys like 0:, 1:.
+invoice_items and invoice_taxes MUST be proper JSON arrays.
+Example:
+"invoice_items": [
+  { "description": "...", "quantity": 1, "rate": 10, "amount": 10 }
+]
+
 """
 
 def ai_parse(text: str) -> dict:
@@ -56,6 +65,12 @@ def ai_parse(text: str) -> dict:
             raise ValueError("No JSON found in AI response")
 
         parsed = json.loads(match.group())
+
+        if not isinstance(parsed.get("invoice_items"), list):
+            parsed["invoice_items"] = []
+
+        if not isinstance(parsed.get("invoice_taxes"), list):
+            parsed["invoice_taxes"] = [] 
 
         return parsed
 

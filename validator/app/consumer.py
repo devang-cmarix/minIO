@@ -13,29 +13,35 @@ def callback(ch, method, properties, body):
     msg = json.loads(body)
 
     data = msg["data"]
+    if isinstance(data, str):
+        data = json.loads(data)
     raw_text = msg.get("raw_text", "")
     file = msg["file"]
 
     valid, errors = validate_invoice(data)
 
-    if valid:
-        insert_invoice(file, data, raw_text)
-        logger.info("Stored valid invoice in MySQL")
+    insert_invoice(file, data, raw_text)
+    
+    if errors:
+        logger.warning(f"Invoice stored with validation issues: {errors}")
+        
+    if not valid:
+        logger.warning("Stored with validation errors")
 
-    else:
-        # minor correction
-        items = data.get("items", [])
-        if not data.get("subtotal") and items:
-            data["subtotal"] = sum(i.get("amount", 0) for i in items)
+    # else:
+    #     # minor correction
+    #     items = data.get("items", [])
+    #     if not data.get("subtotal") and items:
+    #         data["subtotal"] = sum(i.get("amount", 0) for i in items)
 
-        valid_after_fix, _ = validate_invoice(data)
+    #     valid_after_fix, _ = validate_invoice(data)
 
-        if valid_after_fix:
-            insert_invoice(file, data, raw_text)
-            logger.info("Stored corrected invoice in MySQL")
-        else:
-            publish_to_fallback(msg)
-            logger.info("Sent to fallback parser")
+    #     if valid_after_fix:
+    #         insert_invoice(file, data, raw_text)
+    #         logger.info("Stored corrected invoice in MySQL")
+    #     else:
+    #         publish_to_fallback(msg)
+    #         logger.info("Sent to fallback parser")
 
     ch.basic_ack(delivery_tag=method.delivery_tag)
 

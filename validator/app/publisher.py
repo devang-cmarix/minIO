@@ -3,6 +3,8 @@ import json
 from .config import settings
 
 params = pika.URLParameters(settings.RABBITMQ_URL)
+params.heartbeat = 300  # 5 minutes
+params.blocked_connection_timeout = 300
 connection = pika.BlockingConnection(params)
 channel = connection.channel()
 channel.queue_declare(queue=settings.FALLBACK_QUEUE, durable=True)
@@ -10,6 +12,8 @@ channel.queue_declare(queue=settings.FALLBACK_QUEUE, durable=True)
 def publish_to_fallback(message: dict):
     try:
         params = pika.URLParameters(settings.RABBITMQ_URL)
+        params.heartbeat = 300  # 5 minutes
+        params.blocked_connection_timeout = 300
         connection = pika.BlockingConnection(params)
         channel = connection.channel()
 

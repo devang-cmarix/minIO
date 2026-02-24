@@ -13,17 +13,34 @@ class EventPublisher:
         self._connect()
 
     def _connect(self):
+        
         params = pika.URLParameters(settings.RABBITMQ_URL)
-
+        params.heartbeat = 300  # 5 minutes
+        params.blocked_connection_timeout = 300
+        
         while True:
             try:
                 logger.info("Connecting to RabbitMQ...")
                 self.connection = pika.BlockingConnection(params)
                 self.channel = self.connection.channel()
+                # self.channel.queue_declare(
+                #     queue=settings.QUEUE_NAME,
+                #     durable=True
+                # )
                 self.channel.queue_declare(
                     queue=settings.QUEUE_NAME,
+                    durable=True,
+                    arguments={
+                        "x-dead-letter-exchange": "",
+                        "x-dead-letter-routing-key": "file.upload.dlq"
+                    }
+                )
+
+                self.channel.queue_declare(
+                    queue="file.upload.dlq",
                     durable=True
                 )
+
                 logger.info("Connected to RabbitMQ")
                 break
             except Exception as e:
