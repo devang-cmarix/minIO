@@ -443,14 +443,36 @@ except Exception as e:
     mysql_files_df = pd.DataFrame([])
 
 # Get minio-only files (pending extraction)
+# We want to exclude any file that has ever been ingested into MongoDB,
+# not just those currently in the processing pipeline. Otherwise a document
+# that has made it all the way through to step‑3 (stored_mysql=True) would
+# re‑appear under "pending extraction" when we refresh.
+
+def get_all_mongo_filenames(mongo_uri, mongo_db, mongo_coll):
+    try:
+        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+        db = client[mongo_db]
+        coll = db[mongo_coll]
+        # distinct returns all filenames present in the collection
+        names = coll.distinct("filename")
+        return set(names)
+    except Exception:
+        return set()
+
 minio_only_files = []
-if minio_files and not mongodb_processing_df.empty:
-    minio_names = {f["name"] for f in minio_files}
-    mongodb_names = set(mongodb_processing_df["filename"].tolist())
-    pending_names = minio_names - mongodb_names
-    minio_only_files = [f for f in minio_files if f["name"] in pending_names]
-elif minio_files:
-    minio_only_files = minio_files
+if minio_files:
+    # build a set of names that exist *anywhere* in MongoDB (processing or stored)
+    mongo_names = set()
+    if use_mongo:
+        mongo_names = get_all_mongo_filenames(mongo_uri, mongo_db, mongo_coll)
+    elif not mongodb_processing_df.empty:
+        mongo_names = set(mongodb_processing_df["filename"].tolist())
+
+    if mongo_names:
+        minio_only_files = [f for f in minio_files if f["name"] not in mongo_names]
+    else:
+        minio_only_files = minio_files
+
 
 # Live file listing from MinIO
 available_files = []
@@ -629,7 +651,13 @@ def get_validated_pending_storage(mongo_uri, mongo_db, mongo_coll):
         return pd.DataFrame(columns=["filename", "doc_id", "extracted_text", "ingested_at", "validated_at", "status", "full_doc"])
 
 def upload_to_mysql(mysql_host, mysql_port, mysql_user, mysql_password, mysql_db, document_data):
-    """Upload structured invoice data to MySQL."""
+    """Upload structured invoice data to MySQL.
+
+    Returns a tuple ``(success: bool, duplicate: bool)``. ``duplicate`` is
+    ``True`` when the operation failed due to a unique‑constraint (error 1062).
+    In that case the caller can still mark the document as stored because the
+    invoice already exists in the database.
+    """
     try:
         conn = mysql.connector.connect(
             host=mysql_host,
@@ -696,11 +724,20 @@ def upload_to_mysql(mysql_host, mysql_port, mysql_user, mysql_password, mysql_db
         conn.commit()
         cursor.close()
         conn.close()
-        return True
+        return True, False
 
+    except mysql.connector.Error as err:
+        # handle duplicate-key gracefully
+        if err.errno == 1062:
+            st.warning(f"MySQL upload warning: {err}")
+            # treat as success but note duplicate
+            return True, True
+        else:
+            st.error(f"MySQL upload error: {err}")
+            return False, False
     except Exception as e:
         st.error(f"MySQL upload error: {e}")
-        return False
+        return False, False
 
 def mark_stored_in_mysql(doc_id, mongo_uri, mongo_db, mongo_coll):
     """Mark document as stored in MySQL."""
@@ -721,6 +758,61 @@ def mark_stored_in_mysql(doc_id, mongo_uri, mongo_db, mongo_coll):
     except Exception as e:
         st.error(f"MongoDB update error: {e}")
         return False
+
+
+def mark_duplicates_stored(filename, mongo_uri, mongo_db, mongo_coll, full_doc=None):
+    """After one document is stored, mark any remaining documents as stored.
+
+    We look for duplicates in two ways:
+    1. identical filename
+    2. matching structured_data key fields (date/vendor/total) if available
+
+    The queue may enqueue the same PDF multiple times with slightly
+    different names, so the structured_data check is important for catching
+    those cases where filenames differ but the invoice itself is the same.
+    """
+    modified = 0
+    try:
+        client = MongoClient(mongo_uri)
+        db = client[mongo_db]
+        coll = db[mongo_coll]
+
+        # basic filename-based sweep
+        res1 = coll.update_many(
+            {"filename": filename, "pipeline.stored_mysql": False},
+            {"$set": {"pipeline.stored_mysql": True,
+                      "stored_mysql_at": datetime.utcnow()}}
+        )
+        modified += res1.modified_count
+
+        # try structured-data based duplicate detection
+        if full_doc:
+            sd = full_doc.get("structured_data", {}) if isinstance(full_doc, dict) else {}
+            # build a query using the fields that the MySQL unique constraint
+            # is likely based on (invoice_date, vendor_name, total)
+            q = {}
+            if sd.get("invoice_date"):
+                q["structured_data.invoice_date"] = sd.get("invoice_date")
+            if sd.get("vendor_name"):
+                q["structured_data.vendor_name"] = sd.get("vendor_name")
+            if sd.get("total") is not None:
+                q["structured_data.total"] = sd.get("total")
+
+            if q:
+                # combine with stored_mysql False
+                q["pipeline.stored_mysql"] = False
+                res2 = coll.update_many(
+                    q,
+                    {"$set": {"pipeline.stored_mysql": True,
+                              "stored_mysql_at": datetime.utcnow()}}
+                )
+                modified += res2.modified_count
+
+        return modified
+    except Exception as e:
+        # we avoid crashing the UI on cleanup failures
+        st.error(f"MongoDB duplicate cleanup error: {e}")
+        return modified
 
 def process_and_store(filename: str):
     if not st.session_state.get('minio_connected') or not st.session_state.get('minio_client'):
@@ -804,6 +896,42 @@ if not mongodb_processing_df.empty:
         if col not in mongodb_processing_df.columns:
             mongodb_processing_df[col] = False
 
+# imports required for publishing helper
+import orjson
+from bson import ObjectId
+
+def json_serializer(obj):
+    if isinstance(obj, (datetime, pd.Timestamp)):
+        return obj.isoformat()
+    if isinstance(obj, ObjectId):
+        return str(obj)
+    return str(obj)
+
+def publish_to_queue(queue_name, message):
+    params = pika.URLParameters("amqp://guest:guest@rabbitmq:5672/")
+    connection = pika.BlockingConnection(params)
+    channel = connection.channel()
+
+    channel.queue_declare(
+        queue="ai.fallback",
+        durable=True,
+        arguments={
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": "ai.review"
+        }
+    )
+    channel.queue_declare(queue="invoice.process", durable=True)
+    channel.queue_declare(queue="ai.review", durable=True)
+
+    channel.basic_publish(
+        exchange="",
+        routing_key=queue_name,
+        body=orjson.dumps(message,default=json_serializer),
+        properties=pika.BasicProperties(delivery_mode=2),
+    )
+
+    connection.close()
+
 
 # ============ STAGE 2: MongoDB to Validation (Processing) ============
 with tab2:
@@ -843,7 +971,7 @@ with tab2:
                 # Show extracted text preview
                 extracted_text = row['extracted_text']
                 text_preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
-                
+
                 # Show extracted raw text
                 with st.expander("📖 View Extracted Text"):
                     st.text_area(
@@ -863,7 +991,67 @@ with tab2:
                 else:
                     st.warning("⏳ Waiting for AI parsing")
 
-                
+                # ---------------------------
+                # Manual Review Display Block
+                # ---------------------------
+
+                doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
+                if doc and doc.get("status") == "manual_review":
+
+                    try:
+                        client = MongoClient(mongo_uri)
+                        db = client[mongo_db]
+                        coll = db[mongo_coll]
+                        from bson.objectid import ObjectId
+
+                        doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
+                        review_output = doc.get("review_output") if doc else None
+
+                        if review_output:
+                            st.info("📝 Manual Review Mapping Generated")
+
+                            with st.expander("🧾 Review Structured Output", expanded=True):
+                                st.json(review_output)
+
+                            colA, colB = st.columns(2)
+
+                            with colA:
+                                if st.button("✅ Approve Review", key=f"approve_review_{idx}"):
+
+                                    coll.update_one(
+                                        {"_id": ObjectId(row["doc_id"])},
+                                        {
+                                            "$set": {
+                                                "status": "approved",
+                                                "approved_at": datetime.utcnow()
+                                            }
+                                        }
+                                    )
+
+                                    st.success("Invoice Approved")
+
+                            with colB:
+                                if st.button("❌ Reject Review", key=f"reject_review_{idx}"):
+
+                                    coll.update_one(
+                                        {"_id": ObjectId(row["doc_id"])},
+                                        {
+                                            "$set": {
+                                                "status": "rejected",
+                                                "rejected_at": datetime.utcnow()
+                                            }
+                                        }
+                                    )
+
+                                    st.error("Invoice Rejected")
+
+                        else:
+                            st.warning("⏳ Mapping not generated yet. Please wait...")
+
+                    except Exception as e:
+                        st.error("Error loading review data")
+        
+        
                 # Admin actions
                 # Admin decision selector
                 decision = st.radio(
@@ -875,16 +1063,16 @@ with tab2:
 
                 if st.button(
                     "🚀 Submit Decision",
-                    key=f"submit_{idx}",
-                    type="primary"
-                ):
-                    try:
+                    key=f"submit_{idx}", type="primary"):
                         client = MongoClient(mongo_uri)
                         db = client[mongo_db]
                         coll = db[mongo_coll]
                         from bson.objectid import ObjectId
 
-                        if decision == "✅ Valid Invoice":
+                        # Match decision robustly by keyword (avoid exact emoji matching)
+                        d = (decision or "").lower()
+                        if "valid invoice" in d:
+
                             coll.update_one(
                                 {"_id": ObjectId(row["doc_id"])},
                                 {
@@ -895,9 +1083,15 @@ with tab2:
                                     }
                                 }
                             )
-                            st.success("✅ Invoice marked as valid")
 
-                        elif decision == "⚠️ Needs Correction":
+                            publish_to_queue("invoice.process", row.to_dict())
+
+                            st.success("✅ Invoice marked as valid and sent for storage")
+                            # refresh the page so the pending‑validation list updates
+                            st.rerun()
+
+                        elif "needs correction" in d:
+
                             coll.update_one(
                                 {"_id": ObjectId(row["doc_id"])},
                                 {
@@ -907,9 +1101,15 @@ with tab2:
                                     }
                                 }
                             )
+
+                            publish_to_queue("ai.fallback", row.to_dict())
+
                             st.warning("⚠️ Sent to fallback parser")
+                            # refresh immediately after sending to fallback
+                            st.rerun()
 
                         else:
+
                             coll.update_one(
                                 {"_id": ObjectId(row["doc_id"])},
                                 {
@@ -919,12 +1119,16 @@ with tab2:
                                     }
                                 }
                             )
+
+                            doc_full = coll.find_one({"_id": ObjectId(row["doc_id"])})
+
+                            publish_to_queue("ai.review", {
+                                "doc_id": str(row["doc_id"]),
+                                "extracted_text": doc_full.get("extracted_text", "")
+                            })
+
                             st.error("❌ Sent to manual review queue")
-
-                        st.rerun()
-
-                    except Exception as e:
-                        st.error(f"Decision error: {e}")
+                            st.rerun()
 
                 st.divider()
         
@@ -979,6 +1183,7 @@ with tab2:
             }
         )
 
+
 # ============ STAGE 3: Validation to MySQL Storage ============
 with tab3:
     st.subheader("✅ Upload Validated Data to MySQL")
@@ -986,7 +1191,11 @@ with tab3:
     
     # Get validated documents pending storage
     validated_pending_df = get_validated_pending_storage(mongo_uri, mongo_db, mongo_coll)
-    
+    # drop any repeat filenames so that once one entry for a PDF is uploaded
+    # the others are hidden from the UI
+    if not validated_pending_df.empty:
+        validated_pending_df = validated_pending_df.drop_duplicates(subset=["filename"])
+
     if not validated_pending_df.empty:
         st.metric("⏳ Validated & Ready for Upload", len(validated_pending_df))
         st.divider()
@@ -1025,10 +1234,23 @@ with tab3:
                 ):
                     with st.spinner(f"⏳ Uploading {row['filename']} to {target_table}..."):
                         # Upload to MySQL
-                        if upload_to_mysql(mysql_host, int(mysql_port), mysql_user, mysql_password, mysql_db, row['full_doc']):
-                            # Mark as stored in MongoDB
+                        success, dup = upload_to_mysql(mysql_host, int(mysql_port), mysql_user, mysql_password, mysql_db, row['full_doc'])
+
+                        if success:
+                            # Mark as stored in MongoDB regardless of whether the insert
+                            # actually inserted a row or simply collided with an existing
+                            # entry.
                             if mark_stored_in_mysql(row['doc_id'], mongo_uri, mongo_db, mongo_coll):
-                                st.success(f"✅ Uploaded: {row['filename']} → {target_table}")
+                                # sweep any other docs by filename or invoice data
+                                mark_duplicates_stored(
+                                    row['filename'],
+                                    mongo_uri, mongo_db, mongo_coll,
+                                    row.get('full_doc')
+                                )
+                                if dup:
+                                    st.warning(f"⚠️ Document already exists in MySQL; marked as stored ({row['filename']})")
+                                else:
+                                    st.success(f"✅ Uploaded: {row['filename']} → {target_table}")
                                 st.rerun()
                             else:
                                 st.error("Uploaded to MySQL but failed to update MongoDB status")

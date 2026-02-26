@@ -25,3 +25,14 @@ def publish_to_review(msg):
         body=json.dumps(msg),
         properties=pika.BasicProperties(delivery_mode=2),
     )
+
+def publish_to_main(msg):
+    channel = get_channel()
+    channel.queue_declare(queue="invoice.process", durable=True)
+
+    channel.basic_publish(
+        exchange="",
+        routing_key="invoice.process",
+        body=json.dumps(msg),
+        properties=pika.BasicProperties(delivery_mode=2),
+    )

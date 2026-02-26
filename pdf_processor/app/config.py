@@ -9,7 +9,7 @@ class Settings:
     MINIO_SECRET = os.getenv("MINIO_SECRET", "minio123")
     MINIO_BUCKET = "drive-bucket"
 
-    MONGO_URL = os.getenv("MONGO_URL", "mongodb://mongo:27017/")
+    MONGO_URL = os.getenv("MONGO_URL", "mongodb://mongodb:27017/")
     DB_NAME = "files_db"
     COLLECTION = "pdf_texts"
 

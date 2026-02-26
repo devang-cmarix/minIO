@@ -7,7 +7,6 @@ params.heartbeat = 300  # 5 minutes
 params.blocked_connection_timeout = 300
 connection = pika.BlockingConnection(params)
 channel = connection.channel()
-channel.queue_declare(queue=settings.FALLBACK_QUEUE, durable=True)
 
 def publish_to_fallback(message: dict):
     try:
@@ -17,7 +16,14 @@ def publish_to_fallback(message: dict):
         connection = pika.BlockingConnection(params)
         channel = connection.channel()
 
-        channel.queue_declare(queue=settings.FALLBACK_QUEUE, durable=True)
+        channel.queue_declare(
+    queue=settings.FALLBACK_QUEUE,
+    durable=True,
+    arguments={
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "ai.review"
+    }
+)
 
         channel.basic_publish(
             exchange="",

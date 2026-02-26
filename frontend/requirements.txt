@@ -6,3 +6,4 @@ pandas
 mysql-connector-python
 pika
 PyMuPDF
+orjson
