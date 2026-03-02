@@ -121,5 +121,18 @@ services:
       - rabbitmq
       - mysql
 
+  fastapi:
+    build: ./fastapi
+    ports:
+      - "8000:8000"
+    environment:
+      DB_USER: root
+      DB_PASSWORD: Admin@123#@!
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: documents
+    depends_on:
+      - mysql
+
 volumes:
   mongo_data:
