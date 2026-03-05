@@ -651,13 +651,9 @@ def get_validated_pending_storage(mongo_uri, mongo_db, mongo_coll):
         return pd.DataFrame(columns=["filename", "doc_id", "extracted_text", "ingested_at", "validated_at", "status", "full_doc"])
 
 def upload_to_mysql(mysql_host, mysql_port, mysql_user, mysql_password, mysql_db, document_data):
-    """Upload structured invoice data to MySQL.
+    
+    """Upload structured invoice data to MySQL."""
 
-    Returns a tuple ``(success: bool, duplicate: bool)``. ``duplicate`` is
-    ``True`` when the operation failed due to a unique‑constraint (error 1062).
-    In that case the caller can still mark the document as stored because the
-    invoice already exists in the database.
-    """
     try:
         conn = mysql.connector.connect(
             host=mysql_host,
@@ -666,12 +662,23 @@ def upload_to_mysql(mysql_host, mysql_port, mysql_user, mysql_password, mysql_db
             password=mysql_password,
             database=mysql_db
         )
+
         cursor = conn.cursor()
 
-        structured = document_data.get("structured_data", {})
+        # structured = document_data.get("structured_data", {})
+        # Determine which parsing admin selected
+        selected_parsing = document_data.get("selected_parsing", "ai")
+
+        if selected_parsing == "manual":
+            structured = document_data.get("review_output", {})
+        else:
+            structured = document_data.get("structured_data", {})
+
         raw_text = document_data.get("extracted_text", "")
 
-        # Insert into invoices table
+        # -----------------------
+        # Insert invoice
+        # -----------------------
         cursor.execute("""
             INSERT INTO invoices (
                 invoice_date,
@@ -694,8 +701,24 @@ def upload_to_mysql(mysql_host, mysql_port, mysql_user, mysql_password, mysql_db
 
         invoice_id = cursor.lastrowid
 
-        # Insert items
-        for item in structured.get("items", []):
+        # -----------------------
+        # Resolve items list
+        # -----------------------
+        items = (
+            structured.get("invoice_items") or
+            structured.get("items") or
+            []
+        )
+
+        if not isinstance(items, list):
+            items = []
+
+        for item in items:
+
+            quantity = float(str(item.get("quantity", 0)).replace("$", "").replace(",", ""))
+            rate = float(str(item.get("rate", 0)).replace("$", "").replace(",", ""))
+            amount = float(str(item.get("amount", 0)).replace("$", "").replace(",", ""))
+
             cursor.execute("""
                 INSERT INTO invoice_items
                 (invoice_id, description, quantity, rate, amount)
@@ -703,13 +726,28 @@ def upload_to_mysql(mysql_host, mysql_port, mysql_user, mysql_password, mysql_db
             """, (
                 invoice_id,
                 item.get("description"),
-                item.get("quantity"),
-                item.get("rate"),
-                item.get("amount")
+                quantity,
+                rate,
+                amount
             ))
 
-        # Insert taxes
-        for tax in structured.get("taxes", []):
+        # -----------------------
+        # Resolve taxes list
+        # -----------------------
+        taxes = (
+            structured.get("invoice_taxes") or
+            structured.get("taxes") or
+            []
+        )
+
+        if not isinstance(taxes, list):
+            taxes = []
+
+        for tax in taxes:
+
+            tax_rate = float(str(tax.get("tax_rate", 0)).replace("%", "").replace(",", ""))
+            tax_amount = float(str(tax.get("tax_amount", 0)).replace("$", "").replace(",", ""))
+
             cursor.execute("""
                 INSERT INTO invoice_taxes
                 (invoice_id, tax_type, tax_rate, tax_amount)
@@ -717,27 +755,119 @@ def upload_to_mysql(mysql_host, mysql_port, mysql_user, mysql_password, mysql_db
             """, (
                 invoice_id,
                 tax.get("tax_type"),
-                tax.get("tax_rate"),
-                tax.get("tax_amount")
+                tax_rate,
+                tax_amount
             ))
 
         conn.commit()
+
         cursor.close()
         conn.close()
+
         return True, False
 
     except mysql.connector.Error as err:
-        # handle duplicate-key gracefully
+
         if err.errno == 1062:
             st.warning(f"MySQL upload warning: {err}")
-            # treat as success but note duplicate
             return True, True
+
         else:
             st.error(f"MySQL upload error: {err}")
             return False, False
+
     except Exception as e:
         st.error(f"MySQL upload error: {e}")
         return False, False
+    
+    
+    # """Upload structured invoice data to MySQL.
+
+    # Returns a tuple ``(success: bool, duplicate: bool)``. ``duplicate`` is
+    # ``True`` when the operation failed due to a unique‑constraint (error 1062).
+    # In that case the caller can still mark the document as stored because the
+    # invoice already exists in the database.
+    # """
+    # try:
+    #     conn = mysql.connector.connect(
+    #         host=mysql_host,
+    #         port=mysql_port,
+    #         user=mysql_user,
+    #         password=mysql_password,
+    #         database=mysql_db
+    #     )
+    #     cursor = conn.cursor()
+
+    #     structured = document_data.get("structured_data", {})
+    #     raw_text = document_data.get("extracted_text", "")
+
+    #     # Insert into invoices table
+    #     cursor.execute("""
+    #         INSERT INTO invoices (
+    #             invoice_date,
+    #             due_date,
+    #             vendor_name,
+    #             customer_name,
+    #             subtotal,
+    #             total,
+    #             raw_text
+    #         ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+    #     """, (
+    #         structured.get("invoice_date"),
+    #         structured.get("due_date"),
+    #         structured.get("vendor_name"),
+    #         structured.get("customer_name"),
+    #         structured.get("subtotal"),
+    #         structured.get("total"),
+    #         raw_text
+    #     ))
+
+    #     invoice_id = cursor.lastrowid
+
+    #     # Insert items
+    #     for item in structured.get("items", []):
+    #         cursor.execute("""
+    #             INSERT INTO invoice_items
+    #             (invoice_id, description, quantity, rate, amount)
+    #             VALUES (%s,%s,%s,%s,%s)
+    #         """, (
+    #             invoice_id,
+    #             item.get("description"),
+    #             item.get("quantity"),
+    #             item.get("rate"),
+    #             item.get("amount")
+    #         ))
+
+    #     # Insert taxes
+    #     for tax in structured.get("taxes", []):
+    #         cursor.execute("""
+    #             INSERT INTO invoice_taxes
+    #             (invoice_id, tax_type, tax_rate, tax_amount)
+    #             VALUES (%s,%s,%s,%s)
+    #         """, (
+    #             invoice_id,
+    #             tax.get("tax_type"),
+    #             tax.get("tax_rate"),
+    #             tax.get("tax_amount")
+    #         ))
+
+    #     conn.commit()
+    #     cursor.close()
+    #     conn.close()
+    #     return True, False
+
+    # except mysql.connector.Error as err:
+    #     # handle duplicate-key gracefully
+    #     if err.errno == 1062:
+    #         st.warning(f"MySQL upload warning: {err}")
+    #         # treat as success but note duplicate
+    #         return True, True
+    #     else:
+    #         st.error(f"MySQL upload error: {err}")
+    #         return False, False
+    # except Exception as e:
+    #     st.error(f"MySQL upload error: {e}")
+    #     return False, False
 
 def mark_stored_in_mysql(doc_id, mongo_uri, mongo_db, mongo_coll):
     """Mark document as stored in MySQL."""
@@ -1086,146 +1216,6 @@ with tab2:
 
         else:
             st.info("✅ All files validated - no pending approvals!")
-    #     for idx, row in pending_validation_df.iterrows():
-    #         with st.container(border=True):
-    #             col_header = st.columns([4, 1])
-    #             col_header[0].write(f"📄 **{row['filename']}**")
-    #             col_header[1].caption(f"ID: {row['doc_id'][:8]}...")
-
-    #             st.caption(f"Ingested: {row['ingested_at']}")
-
-    #             client = MongoClient(mongo_uri)
-    #             db = client[mongo_db]
-    #             coll = db[mongo_coll]
-    #             from bson.objectid import ObjectId
-
-    #             with st.expander("📖 View Extracted Text"):
-    #                 st.text_area(
-    #                     label="Extracted Content",
-    #                     value=row.get("extracted_text", ""),
-    #                     height=200,
-    #                     disabled=True,
-    #                     key=f"text_preview_{idx}"
-    #                 )
-
-    #             doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
-    #             ai_data = doc.get("structured_data") if doc else None
-    #             manual_data = doc.get("review_output") if doc else None
-
-    #             if ai_data:
-    #                 st.success("🤖 AI Structured Data Available")
-    #                 with st.expander("🤖 View AI Structured Data"):
-    #                     st.json(ai_data)
-
-    #             if manual_data:
-    #                 st.info("🧑 Manual Structured Data Available")
-    #                 with st.expander("🧾 View Manual Structured Data"):
-    #                     st.json(manual_data)
-
-    #             st.markdown("### 🔎 Select Parsing Method")
-
-    #             # parsing_choice = st.radio(
-    #             #     "Choose which parsing result should proceed:",
-    #             #     ["🤖 AI Parsed", "🧑 Manual Parsing"],
-    #             #     horizontal=True,
-    #             #     key=f"parsing_choice_{idx}"
-    #             # )
-                
-    #             parsing_choice = st.radio(
-    #                 "Choose parsing result to view:",
-    #                 ["🤖 AI Parsed", "🧑 Manual Parsing"],
-    #                 horizontal=True,
-    #                 key=f"parsing_choice_{row['doc_id']}"
-    #             )
-
-    #             doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
-
-    #             state_key = f"manual_triggered_{row['doc_id']}"
-
-    #             # Initialize session state
-    #             if state_key not in st.session_state:
-    #                 st.session_state[state_key] = False
-
-    #             # Detect transition to Manual
-    #             if "manual" in parsing_choice.lower() and not st.session_state[state_key]:
-
-    #                 if not doc.get("review_output"):
-
-    #                     st.session_state[state_key] = True  # prevent duplicate trigger
-
-    #                     publish_to_queue(
-    #                         "ai.review",
-    #                         {
-    #                             "doc_id": str(row["doc_id"]),
-    #                             "extracted_text": doc.get("extracted_text", "")
-    #                         }
-    #                     )
-
-    #                     st.info("🧑 Manual parsing triggered...")
-    #                     st.rerun()
-                        
-                        
-    #             if parsing_choice == "🤖 AI Parsed":
-    #                 if doc and doc.get("structured_data"):
-    #                     st.json(doc.get("structured_data"))
-    #                 else:
-    #                     st.warning("AI output not available")
-    #             else:
-    #                 # Manual Parsing choice
-    #                 if doc and doc.get("review_output"):
-    #                     st.json(doc.get("review_output"))
-    #                 else:
-    #                     st.info("⏳ Waiting for manual review to complete. Refresh page in a few seconds.")
-                        
-    #             if st.button("🚀 Confirm Selection", key=f"confirm_{idx}", type="primary"):
-
-    #                 doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
-
-    #                 if parsing_choice == "🤖 AI Parsed":
-
-    #                     coll.update_one(
-    #                         {"_id": ObjectId(row["doc_id"])},
-    #                         {
-    #                             "$set": {
-    #                                 "status": "ai_selected",
-    #                                 "selected_parsing": "ai",
-    #                                 "selection_time": datetime.utcnow()
-    #                             }
-    #                         }
-    #                     )
-
-    #                     st.success("✅ AI Parsing Selected")
-    #                     st.rerun()
-
-    #                 else:
-    #                     st.error("MANUAL BUTTON CLICKED — PUBLISHING NOW")
-
-    #                     publish_to_queue(
-    #                         "ai.review",
-    #                         {
-    #                             "doc_id": str(row["doc_id"]),
-    #                             "extracted_text": doc.get("extracted_text", "")
-    #                         }
-    #                     )
-
-    #                     coll.update_one(
-    #                         {"_id": ObjectId(row["doc_id"])},
-    #                         {
-    #                             "$set": {
-    #                                 "status": "manual_review",
-    #                                 "selected_parsing": "manual",
-    #                                 "selection_time": datetime.utcnow()
-    #                             }
-    #                         }
-    #                     )
-
-    #                     st.warning("🧑 Sent to Manual Review Processing")
-    #                     st.rerun()
-
-    #             st.divider()
-        
-    # else:
-    #     st.info("✅ All files validated - no pending approvals!")
     
     # Show all files in processing pipeline
     if not mongodb_processing_df.empty:
@@ -1326,7 +1316,25 @@ with tab3:
                 ):
                     with st.spinner(f"⏳ Uploading {row['filename']} to {target_table}..."):
                         # Upload to MySQL
-                        success, dup = upload_to_mysql(mysql_host, int(mysql_port), mysql_user, mysql_password, mysql_db, row['full_doc'])
+                        
+                        # success, dup = upload_to_mysql(mysql_host, int(mysql_port), mysql_user, mysql_password, mysql_db, row['full_doc'])
+                        
+                        from bson.objectid import ObjectId
+
+                        client = MongoClient(mongo_uri)
+                        db = client[mongo_db]
+                        coll = db[mongo_coll]
+
+                        latest_doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
+
+                        success, dup = upload_to_mysql(
+                            mysql_host,
+                            int(mysql_port),
+                            mysql_user,
+                            mysql_password,
+                            mysql_db,
+                            latest_doc
+                        )
 
                         if success:
                             # Mark as stored in MongoDB regardless of whether the insert
