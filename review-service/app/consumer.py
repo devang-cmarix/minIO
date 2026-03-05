@@ -40,12 +40,36 @@ def start():
                         ch.basic_ack(delivery_tag=method.delivery_tag)
                         return
 
-                    extracted_text = document.get("extracted_text", {})
+                    raw_text = document.get("extracted_text")
 
-                    # Apply mapping
-                    mapped_output = apply_mapping(extracted_text)
+                    # If raw_text is dict, convert to string safely
+                    if isinstance(raw_text, dict):
+                        raw_text = "\n".join(f"{k}: {v}" for k, v in raw_text.items())
+
+                    if not isinstance(raw_text, str):
+                        raw_text = ""
+                        
+                    logger.info(f"RAW TEXT TYPE: {type(raw_text)}")
+                    logger.info(f"RAW TEXT SAMPLE: {str(raw_text)[:500]}")
+                    
+                    mapped_output = apply_mapping(raw_text)
 
                     # Update Mongo
+                    from datetime import datetime, date
+
+                    # Convert date objects to datetime
+                    if isinstance(mapped_output.get("invoice_date"), date):
+                        mapped_output["invoice_date"] = datetime.combine(
+                            mapped_output["invoice_date"],
+                            datetime.min.time()
+                        )
+
+                    if isinstance(mapped_output.get("due_date"), date):
+                        mapped_output["due_date"] = datetime.combine(
+                            mapped_output["due_date"],
+                            datetime.min.time()
+                        )
+
                     collection.update_one(
                         {"_id": document["_id"]},
                         {

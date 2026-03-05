@@ -907,30 +907,38 @@ def json_serializer(obj):
         return str(obj)
     return str(obj)
 
+
 def publish_to_queue(queue_name, message):
-    params = pika.URLParameters("amqp://guest:guest@rabbitmq:5672/")
-    connection = pika.BlockingConnection(params)
-    channel = connection.channel()
 
-    channel.queue_declare(
-        queue="ai.fallback",
-        durable=True,
-        arguments={
-            "x-dead-letter-exchange": "",
-            "x-dead-letter-routing-key": "ai.review"
-        }
-    )
-    channel.queue_declare(queue="invoice.process", durable=True)
-    channel.queue_declare(queue="ai.review", durable=True)
+    print("========== PUBLISH START ==========")
+    print("QUEUE:", queue_name)
+    print("MESSAGE:", message)
 
-    channel.basic_publish(
-        exchange="",
-        routing_key=queue_name,
-        body=orjson.dumps(message,default=json_serializer),
-        properties=pika.BasicProperties(delivery_mode=2),
-    )
+    try:
+        params = pika.URLParameters("amqp://guest:guest@rabbitmq:5672/")
+        connection = pika.BlockingConnection(params)
+        print("CONNECTED TO RABBITMQ")
 
-    connection.close()
+        channel = connection.channel()
+
+        channel.queue_declare(
+            queue=queue_name,
+            durable=True
+        )
+
+        channel.basic_publish(
+            exchange="",
+            routing_key=queue_name,
+            body=orjson.dumps(message, default=json_serializer),
+            properties=pika.BasicProperties(delivery_mode=2),
+        )
+
+        print("MESSAGE PUBLISHED SUCCESSFULLY")
+
+        connection.close()
+
+    except Exception as e:
+        print("ERROR PUBLISHING:", e)
 
 
 # ============ STAGE 2: MongoDB to Validation (Processing) ============
@@ -946,194 +954,278 @@ with tab2:
         st.divider()
         
         # Admin validation interface
+        client = MongoClient(mongo_uri)
+        db = client[mongo_db]
+        coll = db[mongo_coll]
+
         for idx, row in pending_validation_df.iterrows():
+
+            doc_id = row["doc_id"]
+            object_id = ObjectId(doc_id)
+
             with st.container(border=True):
+
                 col_header = st.columns([4, 1])
                 col_header[0].write(f"📄 **{row['filename']}**")
-                col_header[1].caption(f"ID: {row['doc_id'][:8]}...")
-                
+                col_header[1].caption(f"ID: {doc_id[:8]}...")
+
                 st.caption(f"Ingested: {row['ingested_at']}")
-                
-                try:
-                    client = MongoClient(mongo_uri)
-                    db = client[mongo_db]
-                    coll = db[mongo_coll]
-                    
-                    from bson.objectid import ObjectId
-                    
-                    doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
-                    pipeline = doc.get("pipeline", {}) if doc else {}
-                    ai_status = "🤖 AI Parsed" if pipeline.get("ai_parsed") else "⏳ Waiting for AI"
-                    st.caption(ai_status)
-                except Exception:
-                    st.caption("⏳ Waiting for AI")
 
-                # Show extracted text preview
-                extracted_text = row['extracted_text']
-                text_preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
+                # Fetch latest Mongo document
+                doc = coll.find_one({"_id": object_id})
 
-                # Show extracted raw text
+                # ----------------------------
+                # Extracted Text Preview
+                # ----------------------------
                 with st.expander("📖 View Extracted Text"):
                     st.text_area(
                         label="Extracted Content",
-                        value=row["extracted_text"],
+                        value=row.get("extracted_text", ""),
                         height=200,
                         disabled=True,
-                        key=f"text_preview_{idx}"
+                        key=f"text_preview_{doc_id}"
                     )
 
-                # Show AI parsing status and structured output
-                if row.get("ai_parsed"):
-                    st.success("🤖 AI Parsed Successfully")
+                # ----------------------------
+                # AI & Manual Structured Output
+                # ----------------------------
+                ai_data = doc.get("structured_data") if doc else None
+                manual_data = doc.get("review_output") if doc else None
 
+                if ai_data:
+                    st.success("🤖 AI Structured Data Available")
                     with st.expander("🤖 View AI Structured Data"):
-                        st.json(row.get("structured_data", {}))
-                else:
-                    st.warning("⏳ Waiting for AI parsing")
+                        st.json(ai_data)
 
-                # ---------------------------
-                # Manual Review Display Block
-                # ---------------------------
+                if manual_data:
+                    st.info("🧑 Manual Structured Data Available")
+                    with st.expander("🧾 View Manual Structured Data"):
+                        st.json(manual_data)
 
-                doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
-                if doc and doc.get("status") == "manual_review":
+                # ----------------------------
+                # Admin Parsing Selection
+                # ----------------------------
+                st.markdown("### 🔎 Select Parsing Method")
 
-                    try:
-                        client = MongoClient(mongo_uri)
-                        db = client[mongo_db]
-                        coll = db[mongo_coll]
-                        from bson.objectid import ObjectId
-
-                        doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
-                        review_output = doc.get("review_output") if doc else None
-
-                        if review_output:
-                            st.info("📝 Manual Review Mapping Generated")
-
-                            with st.expander("🧾 Review Structured Output", expanded=True):
-                                st.json(review_output)
-
-                            colA, colB = st.columns(2)
-
-                            with colA:
-                                if st.button("✅ Approve Review", key=f"approve_review_{idx}"):
-
-                                    coll.update_one(
-                                        {"_id": ObjectId(row["doc_id"])},
-                                        {
-                                            "$set": {
-                                                "status": "approved",
-                                                "approved_at": datetime.utcnow()
-                                            }
-                                        }
-                                    )
-
-                                    st.success("Invoice Approved")
-
-                            with colB:
-                                if st.button("❌ Reject Review", key=f"reject_review_{idx}"):
-
-                                    coll.update_one(
-                                        {"_id": ObjectId(row["doc_id"])},
-                                        {
-                                            "$set": {
-                                                "status": "rejected",
-                                                "rejected_at": datetime.utcnow()
-                                            }
-                                        }
-                                    )
-
-                                    st.error("Invoice Rejected")
-
-                        else:
-                            st.warning("⏳ Mapping not generated yet. Please wait...")
-
-                    except Exception as e:
-                        st.error("Error loading review data")
-        
-        
-                # Admin actions
-                # Admin decision selector
-                decision = st.radio(
-                    "Validation Decision",
-                    ["✅ Valid Invoice", "⚠️ Needs Correction", "❌ Major Issues"],
+                parsing_choice = st.radio(
+                    "Choose parsing result to view:",
+                    ["🤖 AI Parsed", "🧑 Manual Parsing"],
                     horizontal=True,
-                    key=f"decision_{idx}"
+                    key=f"parsing_choice_{doc_id}"
                 )
 
-                if st.button(
-                    "🚀 Submit Decision",
-                    key=f"submit_{idx}", type="primary"):
-                        client = MongoClient(mongo_uri)
-                        db = client[mongo_db]
-                        coll = db[mongo_coll]
-                        from bson.objectid import ObjectId
+                # Refresh Mongo doc
+                doc = coll.find_one({"_id": object_id})
 
-                        # Match decision robustly by keyword (avoid exact emoji matching)
-                        d = (decision or "").lower()
-                        if "valid invoice" in d:
+                # Session state key to avoid duplicate queue publish
+                trigger_key = f"manual_triggered_{doc_id}"
 
-                            coll.update_one(
-                                {"_id": ObjectId(row["doc_id"])},
-                                {
-                                    "$set": {
-                                        "pipeline.validated": True,
-                                        "validated_at": datetime.utcnow(),
-                                        "status": "validated"
-                                    }
-                                }
-                            )
+                if trigger_key not in st.session_state:
+                    st.session_state[trigger_key] = False
 
-                            publish_to_queue("invoice.process", row.to_dict())
+                # ----------------------------
+                # AUTO TRIGGER MANUAL PARSING
+                # ----------------------------
+                if "manual" in parsing_choice.lower():
 
-                            st.success("✅ Invoice marked as valid and sent for storage")
-                            # refresh the page so the pending‑validation list updates
-                            st.rerun()
+                    if not doc.get("review_output") and not st.session_state[trigger_key]:
 
-                        elif "needs correction" in d:
+                        st.session_state[trigger_key] = True
 
-                            coll.update_one(
-                                {"_id": ObjectId(row["doc_id"])},
-                                {
-                                    "$set": {
-                                        "pipeline.fallback": True,
-                                        "status": "fallback"
-                                    }
-                                }
-                            )
+                        publish_to_queue(
+                            "ai.review",
+                            {
+                                "doc_id": doc_id,
+                                "extracted_text": doc.get("extracted_text", "")
+                            }
+                        )
 
-                            publish_to_queue("ai.fallback", row.to_dict())
+                        st.info("🧑 Manual parsing triggered...")
+                        st.rerun()
 
-                            st.warning("⚠️ Sent to fallback parser")
-                            # refresh immediately after sending to fallback
-                            st.rerun()
+                # ----------------------------
+                # DISPLAY OUTPUT
+                # ----------------------------
+                if "ai" in parsing_choice.lower():
 
-                        else:
+                    if doc and doc.get("structured_data"):
+                        st.json(doc.get("structured_data"))
+                    else:
+                        st.warning("AI output not available")
 
-                            coll.update_one(
-                                {"_id": ObjectId(row["doc_id"])},
-                                {
-                                    "$set": {
-                                        "pipeline.manual_review": True,
-                                        "status": "manual_review"
-                                    }
-                                }
-                            )
+                elif "manual" in parsing_choice.lower():
 
-                            doc_full = coll.find_one({"_id": ObjectId(row["doc_id"])})
+                    if doc and doc.get("review_output"):
+                        st.json(doc.get("review_output"))
+                    else:
+                        st.info("⏳ Waiting for manual review to complete...")
 
-                            publish_to_queue("ai.review", {
-                                "doc_id": str(row["doc_id"]),
-                                "extracted_text": doc_full.get("extracted_text", "")
-                            })
+                # ----------------------------
+                # CONFIRM SELECTION
+                # ----------------------------
+                if st.button("🚀 Confirm Selection", key=f"confirm_{doc_id}", type="primary"):
 
-                            st.error("❌ Sent to manual review queue")
-                            st.rerun()
+                    selected = "ai" if "ai" in parsing_choice.lower() else "manual"
+
+                    coll.update_one(
+                        {"_id": object_id},
+                        {
+                            "$set": {
+                                "status": "validated",
+                                "selected_parsing": selected,
+                                "selection_time": datetime.utcnow(),
+                                "pipeline.validated": True
+                            }
+                        }
+                    )
+
+                    st.success(f"✅ {selected.upper()} parsing selected")
+                    st.rerun()
 
                 st.divider()
+
+        else:
+            st.info("✅ All files validated - no pending approvals!")
+    #     for idx, row in pending_validation_df.iterrows():
+    #         with st.container(border=True):
+    #             col_header = st.columns([4, 1])
+    #             col_header[0].write(f"📄 **{row['filename']}**")
+    #             col_header[1].caption(f"ID: {row['doc_id'][:8]}...")
+
+    #             st.caption(f"Ingested: {row['ingested_at']}")
+
+    #             client = MongoClient(mongo_uri)
+    #             db = client[mongo_db]
+    #             coll = db[mongo_coll]
+    #             from bson.objectid import ObjectId
+
+    #             with st.expander("📖 View Extracted Text"):
+    #                 st.text_area(
+    #                     label="Extracted Content",
+    #                     value=row.get("extracted_text", ""),
+    #                     height=200,
+    #                     disabled=True,
+    #                     key=f"text_preview_{idx}"
+    #                 )
+
+    #             doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
+    #             ai_data = doc.get("structured_data") if doc else None
+    #             manual_data = doc.get("review_output") if doc else None
+
+    #             if ai_data:
+    #                 st.success("🤖 AI Structured Data Available")
+    #                 with st.expander("🤖 View AI Structured Data"):
+    #                     st.json(ai_data)
+
+    #             if manual_data:
+    #                 st.info("🧑 Manual Structured Data Available")
+    #                 with st.expander("🧾 View Manual Structured Data"):
+    #                     st.json(manual_data)
+
+    #             st.markdown("### 🔎 Select Parsing Method")
+
+    #             # parsing_choice = st.radio(
+    #             #     "Choose which parsing result should proceed:",
+    #             #     ["🤖 AI Parsed", "🧑 Manual Parsing"],
+    #             #     horizontal=True,
+    #             #     key=f"parsing_choice_{idx}"
+    #             # )
+                
+    #             parsing_choice = st.radio(
+    #                 "Choose parsing result to view:",
+    #                 ["🤖 AI Parsed", "🧑 Manual Parsing"],
+    #                 horizontal=True,
+    #                 key=f"parsing_choice_{row['doc_id']}"
+    #             )
+
+    #             doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
+
+    #             state_key = f"manual_triggered_{row['doc_id']}"
+
+    #             # Initialize session state
+    #             if state_key not in st.session_state:
+    #                 st.session_state[state_key] = False
+
+    #             # Detect transition to Manual
+    #             if "manual" in parsing_choice.lower() and not st.session_state[state_key]:
+
+    #                 if not doc.get("review_output"):
+
+    #                     st.session_state[state_key] = True  # prevent duplicate trigger
+
+    #                     publish_to_queue(
+    #                         "ai.review",
+    #                         {
+    #                             "doc_id": str(row["doc_id"]),
+    #                             "extracted_text": doc.get("extracted_text", "")
+    #                         }
+    #                     )
+
+    #                     st.info("🧑 Manual parsing triggered...")
+    #                     st.rerun()
+                        
+                        
+    #             if parsing_choice == "🤖 AI Parsed":
+    #                 if doc and doc.get("structured_data"):
+    #                     st.json(doc.get("structured_data"))
+    #                 else:
+    #                     st.warning("AI output not available")
+    #             else:
+    #                 # Manual Parsing choice
+    #                 if doc and doc.get("review_output"):
+    #                     st.json(doc.get("review_output"))
+    #                 else:
+    #                     st.info("⏳ Waiting for manual review to complete. Refresh page in a few seconds.")
+                        
+    #             if st.button("🚀 Confirm Selection", key=f"confirm_{idx}", type="primary"):
+
+    #                 doc = coll.find_one({"_id": ObjectId(row["doc_id"])})
+
+    #                 if parsing_choice == "🤖 AI Parsed":
+
+    #                     coll.update_one(
+    #                         {"_id": ObjectId(row["doc_id"])},
+    #                         {
+    #                             "$set": {
+    #                                 "status": "ai_selected",
+    #                                 "selected_parsing": "ai",
+    #                                 "selection_time": datetime.utcnow()
+    #                             }
+    #                         }
+    #                     )
+
+    #                     st.success("✅ AI Parsing Selected")
+    #                     st.rerun()
+
+    #                 else:
+    #                     st.error("MANUAL BUTTON CLICKED — PUBLISHING NOW")
+
+    #                     publish_to_queue(
+    #                         "ai.review",
+    #                         {
+    #                             "doc_id": str(row["doc_id"]),
+    #                             "extracted_text": doc.get("extracted_text", "")
+    #                         }
+    #                     )
+
+    #                     coll.update_one(
+    #                         {"_id": ObjectId(row["doc_id"])},
+    #                         {
+    #                             "$set": {
+    #                                 "status": "manual_review",
+    #                                 "selected_parsing": "manual",
+    #                                 "selection_time": datetime.utcnow()
+    #                             }
+    #                         }
+    #                     )
+
+    #                     st.warning("🧑 Sent to Manual Review Processing")
+    #                     st.rerun()
+
+    #             st.divider()
         
-    else:
-        st.info("✅ All files validated - no pending approvals!")
+    # else:
+    #     st.info("✅ All files validated - no pending approvals!")
     
     # Show all files in processing pipeline
     if not mongodb_processing_df.empty:

@@ -1,9 +1,8 @@
 import strawberry
 from typing import List,Optional
 from sqlalchemy.orm import Session
-from .database import get_db,SessionLocal
+from .database import SessionLocal
 from .models import Invoice, InvoiceItems, InvoiceTaxes
-from .schemas import InvoiceItemResponse, InvoiceTaxResponse,InvoiceResponse
 
 @strawberry.type
 class InvoiceType:
