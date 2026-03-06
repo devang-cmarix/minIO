@@ -38,7 +38,7 @@ name: Build and Deploy Pipeline
 on:
   push:
     branches:
-      - main
+      - master
 
 jobs:
 
