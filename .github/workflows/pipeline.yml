@@ -41,9 +41,8 @@ on:
       - master
 
 jobs:
-
-  build:
-    runs-on: ubuntu-latest
+  deploy:
+    runs-on: self-hosted
 
     steps:
       - name: Checkout Repository
@@ -52,36 +51,22 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build All Services
+      - name: Pull latest code
+        run: |
+          git pull origin master
+
+      - name: Stop old containers
+        run: |
+          docker compose down || true
+
+      - name: Build containers
         run: |
           docker compose build
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
+      - name: Start containers
+        run: |
+          docker compose up -d
 
-    steps:
-      - name: Deploy to Local Server
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.SERVER_IP }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: 22
-          script: |
-
-            cd ~/pipeline-project
-
-            echo "Pulling latest code..."
-            git pull origin main
-
-            echo "Stopping containers..."
-            docker compose down
-
-            echo "Rebuilding containers..."
-            docker compose build
-
-            echo "Starting containers..."
-            docker compose up -d
-
-            echo "Deployment completed"
+      - name: Show running containers
+        run: |
+          docker ps
