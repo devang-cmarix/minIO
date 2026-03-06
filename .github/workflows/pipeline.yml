@@ -1,0 +1,87 @@
+# name: CI-CD Pipeline
+
+# on:
+#   push:
+#     branches: [ main ]
+
+# jobs:
+
+#   build:
+#     runs-on: ubuntu-latest
+
+#     steps:
+
+#     - name: Checkout Repository
+#       uses: actions/checkout@v4
+
+#     - name: Set up Python
+#       uses: actions/setup-python@v5
+#       with:
+#         python-version: "3.11"
+
+#     - name: Install Dependencies
+#       run: |
+#         pip install -r requirements.txt
+
+#     - name: Run Basic Tests
+#       run: |
+#         python -m compileall .
+
+#     - name: Build Docker Images
+#       run: |
+#         docker build -t ai-parser ./ai-parser
+#         docker build -t review-service ./review-service
+#         docker build -t streamlit-app ./streamlit-app
+
+name: Build and Deploy Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build All Services
+        run: |
+          docker compose build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to Local Server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          script: |
+
+            cd ~/pipeline-project
+
+            echo "Pulling latest code..."
+            git pull origin main
+
+            echo "Stopping containers..."
+            docker compose down
+
+            echo "Rebuilding containers..."
+            docker compose build
+
+            echo "Starting containers..."
+            docker compose up -d
+
+            echo "Deployment completed"

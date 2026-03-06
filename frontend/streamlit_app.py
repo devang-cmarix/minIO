@@ -676,9 +676,8 @@ def upload_to_mysql(mysql_host, mysql_port, mysql_user, mysql_password, mysql_db
 
         raw_text = document_data.get("extracted_text", "")
 
-        # -----------------------
         # Insert invoice
-        # -----------------------
+        
         cursor.execute("""
             INSERT INTO invoices (
                 invoice_date,
@@ -701,9 +700,8 @@ def upload_to_mysql(mysql_host, mysql_port, mysql_user, mysql_password, mysql_db
 
         invoice_id = cursor.lastrowid
 
-        # -----------------------
         # Resolve items list
-        # -----------------------
+
         items = (
             structured.get("invoice_items") or
             structured.get("items") or
@@ -779,95 +777,6 @@ def upload_to_mysql(mysql_host, mysql_port, mysql_user, mysql_password, mysql_db
     except Exception as e:
         st.error(f"MySQL upload error: {e}")
         return False, False
-    
-    
-    # """Upload structured invoice data to MySQL.
-
-    # Returns a tuple ``(success: bool, duplicate: bool)``. ``duplicate`` is
-    # ``True`` when the operation failed due to a unique‑constraint (error 1062).
-    # In that case the caller can still mark the document as stored because the
-    # invoice already exists in the database.
-    # """
-    # try:
-    #     conn = mysql.connector.connect(
-    #         host=mysql_host,
-    #         port=mysql_port,
-    #         user=mysql_user,
-    #         password=mysql_password,
-    #         database=mysql_db
-    #     )
-    #     cursor = conn.cursor()
-
-    #     structured = document_data.get("structured_data", {})
-    #     raw_text = document_data.get("extracted_text", "")
-
-    #     # Insert into invoices table
-    #     cursor.execute("""
-    #         INSERT INTO invoices (
-    #             invoice_date,
-    #             due_date,
-    #             vendor_name,
-    #             customer_name,
-    #             subtotal,
-    #             total,
-    #             raw_text
-    #         ) VALUES (%s,%s,%s,%s,%s,%s,%s)
-    #     """, (
-    #         structured.get("invoice_date"),
-    #         structured.get("due_date"),
-    #         structured.get("vendor_name"),
-    #         structured.get("customer_name"),
-    #         structured.get("subtotal"),
-    #         structured.get("total"),
-    #         raw_text
-    #     ))
-
-    #     invoice_id = cursor.lastrowid
-
-    #     # Insert items
-    #     for item in structured.get("items", []):
-    #         cursor.execute("""
-    #             INSERT INTO invoice_items
-    #             (invoice_id, description, quantity, rate, amount)
-    #             VALUES (%s,%s,%s,%s,%s)
-    #         """, (
-    #             invoice_id,
-    #             item.get("description"),
-    #             item.get("quantity"),
-    #             item.get("rate"),
-    #             item.get("amount")
-    #         ))
-
-    #     # Insert taxes
-    #     for tax in structured.get("taxes", []):
-    #         cursor.execute("""
-    #             INSERT INTO invoice_taxes
-    #             (invoice_id, tax_type, tax_rate, tax_amount)
-    #             VALUES (%s,%s,%s,%s)
-    #         """, (
-    #             invoice_id,
-    #             tax.get("tax_type"),
-    #             tax.get("tax_rate"),
-    #             tax.get("tax_amount")
-    #         ))
-
-    #     conn.commit()
-    #     cursor.close()
-    #     conn.close()
-    #     return True, False
-
-    # except mysql.connector.Error as err:
-    #     # handle duplicate-key gracefully
-    #     if err.errno == 1062:
-    #         st.warning(f"MySQL upload warning: {err}")
-    #         # treat as success but note duplicate
-    #         return True, True
-    #     else:
-    #         st.error(f"MySQL upload error: {err}")
-    #         return False, False
-    # except Exception as e:
-    #     st.error(f"MySQL upload error: {e}")
-    #     return False, False
 
 def mark_stored_in_mysql(doc_id, mongo_uri, mongo_db, mongo_coll):
     """Mark document as stored in MySQL."""
